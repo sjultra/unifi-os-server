@@ -12,9 +12,12 @@ metadata:
 spec:
   replicas: 1                     # never more: one console, one data volume
   serviceName: {{ include "uos.name" . }}
-  podManagementPolicy: OrderedReady
+  # Parallel: with OrderedReady, a pod that never becomes Ready (Init:CrashLoopBackOff, Pending
+  # on a host port) is never replaced, so a fixed release can't reach it without deleting the pod
+  # by hand. With one replica it orders nothing else. The field is immutable after install.
+  podManagementPolicy: Parallel
   updateStrategy:
-    type: RollingUpdate           # with one replica: old pod is gone before the new one starts
+    type: RollingUpdate           # one replica: the old pod is deleted before the new one is created
   selector:
     matchLabels: {{- include "uos.selector" . | nindent 6 }}
   template:
