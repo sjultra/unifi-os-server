@@ -1,0 +1,187 @@
+{{- $inst := include "uos.installers" . | fromJson }}
+{{- if and (not .Values.nodeSelector) (not .Values.affinity) }}{{ fail "nodeSelector or affinity is required: UniFi OS Server runs on one chosen node" }}{{ end }}
+{{- /* configure.sh writes it with sed: keep it to hostname/IPv4 characters */}}
+{{- if and .Values.uos.systemIp (not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$" .Values.uos.systemIp)) }}{{ fail (printf "uos.systemIp must be a hostname or IPv4 address, got %q" .Values.uos.systemIp) }}{{ end }}
+{{- /* persisted paths (Ubiquiti's mounts.json plus /data): subPath of the one PVC -> path in the image */}}
+{{- $persist := list (list "data" "/data") (list "var-lib-unifi" "/var/lib/unifi") (list "var-lib-mongodb" "/var/lib/mongodb") (list "etc-rabbitmq-ssl" "/etc/rabbitmq/ssl") (list "srv" "/srv") (list "persistent" "/persistent") (list "var-log" "/var/log") }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "uos.name" . }}
+  labels: {{- include "uos.labels" . | nindent 4 }}
+spec:
+  replicas: 1                     # never more: one console, one data volume
+  serviceName: {{ include "uos.name" . }}
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate           # with one replica: old pod is gone before the new one starts
+  selector:
+    matchLabels: {{- include "uos.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "uos.selector" . | nindent 8 }}
+      annotations:
+        checksum/scripts: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 180
+      initContainers:
+        # 1. is the image already in this node's containerd?
+        - name: check-image
+          image: {{ .Values.tools.ctr }}
+          command: ["/bin/sh", "/scripts/image.sh", "check"]
+          env: &ctrEnv
+            - { name: TARGET, value: {{ include "uos.image" . | quote }} }
+            - { name: CONTAINERD_SOCKET, value: /host/containerd.sock }
+            - { name: TOOL_IMAGES, value: {{ printf "%s %s" .Values.tools.ctr .Values.tools.python | quote }} }
+          securityContext: { privileged: true }
+          volumeMounts: &ctrMounts
+            - { name: scripts, mountPath: /scripts }
+            - { name: work, mountPath: /work }
+            - { name: containerd-sock, mountPath: /host/containerd.sock }
+        # 2. if not: download Ubiquiti's installer for this node's arch, verify sha256,
+        #    extract image.tar (the installer is never executed)
+        - name: fetch
+          image: {{ .Values.tools.python }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              [ -f /work/present ] && { echo "image present, skipping download"; exit 0; }
+              arch="$UOS_ARCH"
+              if [ -z "$arch" ]; then
+                case "$(uname -m)" in
+                  x86_64) arch=amd64 ;;
+                  aarch64|arm64) arch=arm64 ;;
+                  *) echo "unsupported node architecture $(uname -m): UniFi OS Server needs amd64 or arm64"; exit 1 ;;
+                esac
+                echo "detected node architecture $arch"
+              fi
+              case "$arch" in
+                amd64) url="$INSTALLER_URL_AMD64"; sha="$INSTALLER_SHA256_AMD64" ;;
+                arm64) url="$INSTALLER_URL_ARM64"; sha="$INSTALLER_SHA256_ARM64" ;;
+              esac
+              [ -n "$url" ] && [ -n "$sha" ] || { echo "no installer configured for $arch"; exit 1; }
+              mkdir -p /work/out
+              python3 -I /scripts/uos_image.py fetch "$url" "$sha" /work/installer
+              python3 -I /scripts/uos_image.py extract /work/installer /work/out > /work/out/ref
+              rm -f /work/installer
+          env:
+            - { name: UOS_ARCH, value: {{ .Values.uos.arch | quote }} }
+            {{- range $arch, $i := $inst }}
+            - { name: INSTALLER_URL_{{ upper $arch }}, value: {{ $i.url | quote }} }
+            - { name: INSTALLER_SHA256_{{ upper $arch }}, value: {{ $i.sha256 | quote }} }
+            {{- end }}
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts }
+            - { name: work, mountPath: /work }
+        # 3. import into the node's containerd under the local-only name, pinned against image GC
+        - name: import-image
+          image: {{ .Values.tools.ctr }}
+          command: ["/bin/sh", "/scripts/image.sh", "import"]
+          env: *ctrEnv
+          securityContext: { privileged: true }
+          volumeMounts: *ctrMounts
+        # 4. write config on the data volume (seed from image, identity, downgrade guard, system_ip)
+        - name: configure
+          image: {{ include "uos.image" . }}
+          imagePullPolicy: Never
+          command: ["/bin/bash", "/scripts/configure.sh"]
+          env:
+            - { name: UOS_VERSION, value: {{ .Values.uos.version | quote }} }
+            - { name: ALLOW_DOWNGRADE, value: {{ .Values.uos.allowDowngrade | quote }} }
+            - { name: SYSTEM_IP, value: {{ .Values.uos.systemIp | quote }} }
+            - name: HOST_IP
+              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+            - name: SEED_DIRS
+              value: "{{ range $persist }}{{ index . 0 }}:{{ index . 1 }} {{ end }}"
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts }
+            - { name: data, mountPath: /pvc }   # whole volume: the image's own paths stay visible to copy from
+      containers:
+        - name: unifi-os-server
+          image: {{ include "uos.image" . }}
+          imagePullPolicy: Never
+          # Ubiquiti's entrypoint, with the env its own installer would pass
+          command:
+            - /bin/bash
+            - -c
+            - |
+              case "$(dpkg --print-architecture)" in
+                amd64) export FIRMWARE_PLATFORM=linux-x64 ;; arm64) export FIRMWARE_PLATFORM=linux-arm64 ;;
+              esac
+              export UOS_UUID="$(cat /data/uos_uuid)"
+              exec /root/uos-entrypoint.sh
+          env:
+            - { name: container, value: docker }
+            - { name: APP_MODEL, value: UOSSERVER }
+            - { name: PRODUCT_NAME, value: "UniFi OS Server" }
+            - { name: APP_VERSION, value: {{ .Values.uos.version | quote }} }
+          securityContext:
+            privileged: true      # systemd needs a writable cgroup; also NET_RAW/NET_ADMIN
+          lifecycle:
+            preStop:
+              # systemd (PID 1) halts cleanly on SIGRTMIN+3; SIGTERM alone does not stop it cleanly
+              exec: { command: ["/bin/bash", "-c", "kill -s SIGRTMIN+3 1; sleep 170"] }
+          ports:
+            - { name: https, containerPort: 443, protocol: TCP }
+            - { name: http, containerPort: 80, protocol: TCP }
+            {{- if .Values.hostPorts.enabled }}
+            {{- range .Values.hostPorts.ports }}
+            - { name: {{ .name | trunc 15 | quote }}, containerPort: {{ .port }}, hostPort: {{ .port }}, protocol: {{ .protocol }} }
+            {{- end }}
+            {{- end }}
+          startupProbe:
+            httpGet: { path: /api/ping, port: 80 }
+            periodSeconds: 10
+            failureThreshold: 60          # up to 10 min on first boot / migrations
+          readinessProbe:
+            httpGet: { path: /api/ping, port: 80 }
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /api/ping, port: 80 }
+            periodSeconds: 60
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- range $persist }}
+            - { name: data, mountPath: {{ index . 1 }}, subPath: {{ index . 0 }} }
+            {{- end }}
+            - { name: run, mountPath: /run }
+            - { name: run-lock, mountPath: /run/lock }
+            - { name: tmp, mountPath: /tmp }
+            - { name: journal, mountPath: /var/lib/journal }
+            - { name: unifi-tmp, mountPath: /var/opt/unifi/tmp }
+      volumes:
+        - name: scripts
+          configMap: { name: {{ include "uos.name" . }}-scripts }
+        - name: work
+          emptyDir: { sizeLimit: {{ .Values.downloadVolumeSizeLimit }} }
+        - name: containerd-sock
+          hostPath: { path: {{ .Values.containerdSocket }}, type: Socket }
+        - { name: run, emptyDir: { medium: Memory, sizeLimit: 256Mi } }
+        - { name: run-lock, emptyDir: { medium: Memory, sizeLimit: 8Mi } }
+        - { name: tmp, emptyDir: { medium: Memory, sizeLimit: 512Mi } }
+        - { name: journal, emptyDir: { medium: Memory, sizeLimit: 128Mi } }
+        - { name: unifi-tmp, emptyDir: { medium: Memory, sizeLimit: 64Mi } }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

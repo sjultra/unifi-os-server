@@ -1,0 +1,67 @@
+# Releases one version of the unifi-os-server chart, versioned by the release tag.
+# To release: Releases → "Draft a new release" → tag vX.Y.Z → Publish.
+# A version that's already published is never overwritten. No image: the chart
+# downloads Ubiquiti's installer on the target node at install time, so this
+# workflow never fetches, stores or publishes any Ubiquiti software.
+# appVersion stays as Chart.yaml sets it (the UniFi OS Server version).
+
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write       # GHCR push with GITHUB_TOKEN
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      CHARTS: oci://ghcr.io/${{ github.repository_owner }}/charts
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read version
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release tag must be vX.Y.Z, got $TAG"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "chart=$(yq '.name' helm/service/Chart.yaml)" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      - name: Log in to GHCR (Helm)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Check version
+        id: check
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CHART: ${{ steps.version.outputs.chart }}
+        run: |
+          if helm show chart "$CHARTS/$CHART" --version "$VERSION" >/dev/null 2>&1; then
+            echo "::notice::$CHART $VERSION is already published; release a new version to publish"
+            echo "chart=done" >> "$GITHUB_OUTPUT"
+          else
+            echo "chart=publish" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish chart
+        if: steps.check.outputs.chart == 'publish'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CHART: ${{ steps.version.outputs.chart }}
+        run: |
+          helm lint helm/service --strict --set 'nodeSelector.kubernetes\.io/hostname=lint'   # placement is required
+          helm package helm/service --version "$VERSION"
+          helm push "$CHART-$VERSION.tgz" "$CHARTS"

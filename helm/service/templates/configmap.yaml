@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "uos.name" . }}-scripts
+  labels: {{- include "uos.labels" . | nindent 4 }}
+data:
+  uos_image.py: |-
+{{ .Files.Get "files/uos_image.py" | indent 4 }}
+  image.sh: |-
+{{ .Files.Get "files/image.sh" | indent 4 }}
+  configure.sh: |-
+{{ .Files.Get "files/configure.sh" | indent 4 }}

@@ -1,0 +1,30 @@
+{{- if .Values.ui.ingress.enabled }}
+{{- if not .Values.ui.ingress.host }}{{ fail "ui.ingress.host is required when ui.ingress.enabled" }}{{ end }}
+{{- if .Values.ui.ingress.insecureBackend }}
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: {{ include "uos.name" . }}-insecure
+  labels: {{- include "uos.labels" . | nindent 4 }}
+spec:
+  insecureSkipVerify: true
+---
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "uos.name" . }}
+  labels: {{- include "uos.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ui.ingress.className }}
+  rules:
+    - host: {{ .Values.ui.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "uos.name" . }}
+                port: { name: https }
+{{- end }}
