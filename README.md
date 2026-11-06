@@ -89,7 +89,7 @@ helm install uos oci://ghcr.io/sjultra/charts/unifi-os-server --version 0.1.0 --
 
 A new UniFi OS Server release means a new chart version with the new installers. `helm upgrade` replaces the pod once: the old pod stops (a clean systemd halt) before the new one downloads and imports the new version. Data on the PVC is kept. Downgrades are refused unless `uos.allowDowngrade=true`.
 
-The old version's image stays pinned on the node. Remove it on the node with `k3s crictl rmi localhost/unifi-os-server:<old-version>` (not `ctr images rm`, which only removes the tag and frees nothing).
+After importing the new version, `import-image` unpins and removes the other versions of `localhost/unifi-os-server` on the node, so each upgrade frees the old image (about 2.3 GB). The cleanup is best effort: if it fails, its log says so and the pod starts anyway; remove the leftover on the node with `k3s crictl rmi localhost/unifi-os-server:<old-version>` (not `ctr images rm`, which only removes the tag and frees nothing).
 
 ## Uninstall
 
@@ -99,7 +99,7 @@ helm uninstall uos --namespace unifi
 
 That leaves:
 - **The data PVC** `data-uos-0`: StatefulSet claims are kept on purpose. Delete it (and with it all console data) with `kubectl -n unifi delete pvc data-uos-0`, or delete the namespace.
-- **The images** on the node, pinned: `k3s crictl rmi localhost/unifi-os-server:<version>`, plus the two tool images if nothing else uses them.
+- **The current image** on the node, pinned. Remove it on the node with `k3s crictl rmi localhost/unifi-os-server:<version>` (e.g. `k3s crictl rmi localhost/unifi-os-server:5.1.42`), plus the two tool images if nothing else uses them.
 
 Factory-reset any devices you adopted if they move to another controller.
 
@@ -118,6 +118,13 @@ Factory-reset any devices you adopted if they move to another controller.
   ```
 
 - **Devices don't adopt:** check that they can reach `http://<node-ip>:8080/inform` (it answers 400 to a plain GET) and that `system_ip` in the `configure` log is an address they can reach.
+
+## Known issues
+
+- Tested only against k3s 1.31 (containerd 1.7). On a node with containerd 2.x, the `ctr`/`crictl` from `tools.ctr` (k3s 1.31) are untested; set `tools.ctr` to the node's k3s version if the image steps fail.
+- Rolling back after a failed upgrade (`helm rollback`) needs `uos.allowDowngrade=true`: `configure` records the newer version on the data before the console starts, even if the upgrade then fails, and the downgrade guard refuses the older one.
+- Changing only the installer URL/sha256 for the same `uos.version` doesn't re-download: the image for that version is already on the node. Remove it on the node (`k3s crictl rmi localhost/unifi-os-server:<version>`) and restart the pod.
+- When installed from the Portal console, only the UI NodePort (30443) is checked for conflicts, not the host ports 8080/tcp, 3478/udp and 10003/udp; a clash leaves the pod Pending.
 
 ## Release
 
