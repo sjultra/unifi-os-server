@@ -40,13 +40,17 @@ if [ -s "$marker" ]; then
 fi
 echo "$UOS_VERSION" > "$marker"
 
-# 3. the address devices inform to (keep the file's owner: unifi)
+# 3. where devices inform to: address and port (keep the file's owner: unifi)
 props=/pvc/var-lib-unifi/system.properties
-ip="${SYSTEM_IP:-$HOST_IP}"
-if [ -f "$props" ] && grep -q '^system_ip=' "$props"; then
-  sed -i "s|^system_ip=.*|system_ip=${ip}|" "$props"
-else
-  echo "system_ip=${ip}" >> "$props"
-  chown --reference=/pvc/var-lib-unifi "$props"
-fi
-echo "system_ip=${ip}"
+set_prop() {
+  if [ -f "$props" ] && grep -q "^$1=" "$props"; then
+    sed -i "s|^$1=.*|$1=$2|" "$props"
+  else
+    echo "$1=$2" >> "$props"
+    chown --reference=/pvc/var-lib-unifi "$props"
+  fi
+  echo "$1=$2"
+}
+set_prop system_ip "${SYSTEM_IP:-$HOST_IP}"
+case "${INFORM_PORT:-}" in ''|*[!0-9]*) echo "INFORM_PORT must be a number, got '${INFORM_PORT:-}'"; exit 1 ;; esac
+set_prop unifi.http.port "$INFORM_PORT"

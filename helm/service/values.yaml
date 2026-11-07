@@ -17,6 +17,10 @@ uos:
   # A DNS name that resolves on the device LAN is more robust. Hostname or IPv4 characters only
   # (letters, digits, dots, hyphens); anything else fails rendering.
   systemIp: ""
+  # TCP port devices inform to: published on the node (hostPort) and set as UniFi's
+  # unifi.http.port, so the address UniFi gives devices after adoption uses it too.
+  # 8080 is UniFi's default; pick another if the host already uses it (CrowdSec's API does).
+  informPort: 8080
   # Escape hatch: allow starting an older version on newer data (UniFi does not support downgrades).
   allowDowngrade: false
 
@@ -62,7 +66,7 @@ resources:
 hostPorts:
   enabled: true
   ports:
-    - { name: inform, port: 8080, protocol: TCP }       # device inform (required for adoption)
+    # inform (required for adoption) is uos.informPort, published alongside these
     - { name: stun, port: 3478, protocol: UDP }         # STUN (required)
     - { name: discovery, port: 10003, protocol: UDP }   # device discovery
     - { name: syslog, port: 5514, protocol: UDP }       # remote syslog
