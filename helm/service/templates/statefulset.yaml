@@ -127,6 +127,13 @@ spec:
                 amd64) export FIRMWARE_PLATFORM=linux-x64 ;; arm64) export FIRMWARE_PLATFORM=linux-arm64 ;;
               esac
               export UOS_UUID="$(cat /data/uos_uuid)"
+              {{- if .Values.uos.hostTimeSync }}
+              # the host keeps the clock: tell systemd's timedated time sync is handled (uos.hostTimeSync)
+              printf '[Unit]\nDescription=Clock kept in sync by the host\n[Service]\nType=oneshot\nExecStart=/bin/true\nRemainAfterExit=yes\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/host-ntp.service
+              mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/ntp-units.d
+              ln -sf /etc/systemd/system/host-ntp.service /etc/systemd/system/multi-user.target.wants/host-ntp.service
+              echo host-ntp.service > /etc/systemd/ntp-units.d/90-host.list
+              {{- end }}
               exec /root/uos-entrypoint.sh
           env:
             - { name: container, value: docker }

@@ -25,10 +25,11 @@ Ubiquiti's terms don't allow redistributing their software. This repository, its
 - One k3s node, amd64 or arm64, Linux with cgroup v2. The chart talks to k3s's containerd socket (`/run/k3s/containerd/containerd.sock`).
 - **Privileged pods** allowed in the namespace (systemd needs a writable cgroup; the image steps use the node's containerd socket). With Pod Security Admission, label the namespace `pod-security.kubernetes.io/enforce=privileged`.
 - **Host ports** free on the node: at least the inform port (`uos.informPort`, default 8080/tcp), 3478/udp and 10003/udp (full list in `hostPorts.ports`). No other UniFi controller may run on the host: a hostPort silently takes the port from a host process. CrowdSec's API listens on 8080, so on hosts running CrowdSec set `uos.informPort` to a free port (e.g. 8180).
-- **Disk:** at least **5 GB free** on the node for the download and import (about 2.3 GB stays for the image), **plus the PVC** (20 Gi by default, from the default storage class; local-path on k3s).
+- **Disk:** at least **5 GB free** on the node for the download and import (about 2.3 GB stays for the image), **plus the PVC** (20 Gi by default, from the default storage class; local-path on k3s). The first start is heavy on forced (synced) writes. **Prefer an agent node**, or a server node with a modern SSD: on a k3s server node, etcd shares the disk, and on an old SATA SSD (slow flushes) its `fdatasync` reached 1–2.5 s, so k3s lost leader election and restarted in a loop, taking every pod on the node with it.
 - **RAM:** at least 4 GB on the node. The pod requests 2 Gi and uses about 1.2 GB once settled; leave the memory limit unset or at 3 Gi or more (the in-memory tmpfs mounts count against it).
 - Outbound HTTPS from the node to `fw-download.ubnt.com` and `mirror.gcr.io`.
-- Devices must reach the node's IP: on the same L2 segment, or via L3 adoption (`set-inform`, DHCP option 43 or DNS `unifi`). L2 discovery of unadopted devices may not work.
+- Devices must reach the node's IP: on the same L2 segment, or via L3 adoption (`set-inform`, DHCP option 43 or DNS `unifi`). On a network that already has a UniFi gateway or controller (e.g. a UDM), a factory-reset device shows up there, not here: point it here with `set-inform http://<node-ip>:<informPort>/inform` (SSH `ui`/`ui` or `ubnt`/`ubnt` on a reset device), and it moves over. Don't adopt it in the other controller.
+- The host keeps its clock synced (chrony/timesyncd): the container uses the host's clock (see `uos.hostTimeSync`).
 
 ## Quick start
 
@@ -68,6 +69,7 @@ helm install uos oci://ghcr.io/sjultra/charts/unifi-os-server --version 0.1.0 --
 | `uos.installers.{amd64,arm64}.{url,sha256}` | 5.1.42 | Ubiquiti's installer URL and sha256 per architecture, from `https://fw-update.ui.com/api/firmware?filter=eq~~product~~unifi-os-server`. |
 | `uos.systemIp` | `""` | The address devices inform to. Empty means the node's IP. A hostname or IPv4 address (letters, digits, dots, hyphens). |
 | `uos.informPort` | `8080` | TCP port devices inform to. Published on the node and set as UniFi's `unifi.http.port`, so adopted devices keep using it. Choose it before adopting devices: changing it later disconnects them until each is pointed at the new port (`set-inform`). |
+| `uos.hostTimeSync` | `true` | Registers a no-op unit as systemd's time-sync service in the container, so UniFi sees time sync as active (it refuses remote access otherwise: "incorrect date/time"). The host keeps the clock; no second NTP daemon runs in the privileged container. The host must keep its clock synced (chrony/timesyncd). |
 | `uos.allowDowngrade` | `false` | Allows starting an older version on newer data. UniFi doesn't support downgrades. |
 | `persistence.size` | `20Gi` | Size of the data PVC. |
 | `persistence.storageClass` | `""` | Storage class; empty is the cluster default. |
@@ -87,6 +89,8 @@ helm install uos oci://ghcr.io/sjultra/charts/unifi-os-server --version 0.1.0 --
 | `localImage` | `localhost/unifi-os-server` | Local-only name the image is imported under. |
 
 ## Upgrade
+
+**Apps vs UniFi OS Server.** In-app updates of UniFi **apps** (Network, etc.) survive pod restarts: UniFi OS keeps the downloaded packages in `/persistent/dpkg` (on the PVC) and reinstalls them at boot. Leave app auto-updates on. In-app updates of **UniFi OS Server** itself don't: they change the container, which a restart replaces with the chart's image, leaving an older version on migrated data. Keep UniFi OS auto-updates off and update UniFi OS Server through a new chart version.
 
 A new UniFi OS Server release means a new chart version with the new installers. `helm upgrade` replaces the pod once: the old pod stops (a clean systemd halt) before the new one downloads and imports the new version. Data on the PVC is kept. Downgrades are refused unless `uos.allowDowngrade=true`.
 
@@ -118,6 +122,7 @@ Factory-reset any devices you adopted if they move to another controller.
   kubectl -n unifi exec uos-0 -- journalctl -u unifi-core -u unifi --no-pager -n 200
   ```
 
+- **"An incorrect date/time is preventing you from establishing remote connectivity":** `uos.hostTimeSync` must be `true` (the default), and the host's clock synced. Inside the pod, `timedatectl` should show `NTP service: active`.
 - **Devices don't adopt:** check that they can reach `http://<node-ip>:<informPort>/inform` (it answers 400 to a plain GET), that you used that port in `set-inform`, and that `system_ip` in the `configure` log is an address they can reach.
 
 ## Known issues
