@@ -21,6 +21,11 @@ uos:
   # unifi.http.port, so the address UniFi gives devices after adoption uses it too.
   # 8080 is UniFi's default; pick another if the host already uses it (CrowdSec's API does).
   informPort: 8080
+  # The container shares the host's clock but runs no time service of its own, so UniFi
+  # sees "NTP service: n/a" and refuses remote access ("incorrect date/time"). true registers
+  # a no-op unit as systemd's time-sync service, so it reports active while the host keeps
+  # the clock (no second NTP daemon that could fight the host's over the shared clock).
+  hostTimeSync: true
   # Escape hatch: allow starting an older version on newer data (UniFi does not support downgrades).
   allowDowngrade: false
 

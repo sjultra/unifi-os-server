@@ -68,6 +68,7 @@ helm install uos oci://ghcr.io/sjultra/charts/unifi-os-server --version 0.1.0 --
 | `uos.installers.{amd64,arm64}.{url,sha256}` | 5.1.42 | Ubiquiti's installer URL and sha256 per architecture, from `https://fw-update.ui.com/api/firmware?filter=eq~~product~~unifi-os-server`. |
 | `uos.systemIp` | `""` | The address devices inform to. Empty means the node's IP. A hostname or IPv4 address (letters, digits, dots, hyphens). |
 | `uos.informPort` | `8080` | TCP port devices inform to. Published on the node and set as UniFi's `unifi.http.port`, so adopted devices keep using it. Choose it before adopting devices: changing it later disconnects them until each is pointed at the new port (`set-inform`). |
+| `uos.hostTimeSync` | `true` | Registers a no-op unit as systemd's time-sync service in the container, so UniFi sees time sync as active (it refuses remote access otherwise: "incorrect date/time"). The host keeps the clock; no second NTP daemon runs in the privileged container. The host must keep its clock synced (chrony/timesyncd). |
 | `uos.allowDowngrade` | `false` | Allows starting an older version on newer data. UniFi doesn't support downgrades. |
 | `persistence.size` | `20Gi` | Size of the data PVC. |
 | `persistence.storageClass` | `""` | Storage class; empty is the cluster default. |

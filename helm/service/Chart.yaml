@@ -5,6 +5,6 @@ description: >-
   downloads Ubiquiti's official installer on the target node, verifies its sha256, and imports
   the image it contains into that node's containerd. Not supported by Ubiquiti.
 type: application
-version: 0.1.1
+version: 0.1.2
 appVersion: "5.1.42"
 home: https://github.com/sjultra/unifi-os-server
