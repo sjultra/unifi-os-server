@@ -11,10 +11,10 @@ The chart contains no Ubiquiti software. It carries only the URL and sha256 of U
 1. `check-image` looks for `localhost/unifi-os-server:<version>` in the node's containerd. If it's there, the next two steps skip.
 2. `fetch` picks the installer for the node's architecture (`uname -m`, or `uos.arch`), downloads it from Ubiquiti (`fw-download.ubnt.com`) onto the node, checks its sha256 and takes `image.tar` out of the ZIP appended to it. The installer is never executed.
 3. `import-image` imports the image into the node's containerd, tags it `localhost/unifi-os-server:<version>` and pins it (and the two tool images) so kubelet image garbage collection keeps it.
-4. `configure` prepares the data volume: on first run it copies the image's default contents of each persisted directory onto the volume, generates the console's UUID, refuses a downgrade, and writes the inform address (`system_ip`).
+4. `configure` prepares the data volume: on first run it copies the image's default contents of each persisted directory onto the volume, generates the console's UUID, refuses a downgrade, and writes where devices inform to (`system_ip` and `unifi.http.port`).
 5. The main container runs Ubiquiti's image and entrypoint unchanged (systemd inside, privileged).
 
-The UI is served by a Service (ClusterIP, or NodePort for LAN access), optionally behind an Ingress. Device-facing ports (inform 8080, STUN 3478/udp, ...) are `hostPort`s on the node's IP.
+The UI is served by a Service (ClusterIP, or NodePort for LAN access), optionally behind an Ingress. Device-facing ports (inform `uos.informPort`, default 8080; STUN 3478/udp, ...) are `hostPort`s on the node's IP.
 
 ### Licensing
 
@@ -24,7 +24,7 @@ Ubiquiti's terms don't allow redistributing their software. This repository, its
 
 - One k3s node, amd64 or arm64, Linux with cgroup v2. The chart talks to k3s's containerd socket (`/run/k3s/containerd/containerd.sock`).
 - **Privileged pods** allowed in the namespace (systemd needs a writable cgroup; the image steps use the node's containerd socket). With Pod Security Admission, label the namespace `pod-security.kubernetes.io/enforce=privileged`.
-- **Host ports** free on the node: at least 8080/tcp, 3478/udp and 10003/udp (full list in `hostPorts.ports`). No other UniFi controller may run on the host: a hostPort silently takes the port from a host process.
+- **Host ports** free on the node: at least the inform port (`uos.informPort`, default 8080/tcp), 3478/udp and 10003/udp (full list in `hostPorts.ports`). No other UniFi controller may run on the host: a hostPort silently takes the port from a host process. CrowdSec's API listens on 8080, so on hosts running CrowdSec set `uos.informPort` to a free port (e.g. 8180).
 - **Disk:** at least **5 GB free** on the node for the download and import (about 2.3 GB stays for the image), **plus the PVC** (20 Gi by default, from the default storage class; local-path on k3s).
 - **RAM:** at least 4 GB on the node. The pod requests 2 Gi and uses about 1.2 GB once settled; leave the memory limit unset or at 3 Gi or more (the in-memory tmpfs mounts count against it).
 - Outbound HTTPS from the node to `fw-download.ubnt.com` and `mirror.gcr.io`.
@@ -45,10 +45,10 @@ The first start takes a few minutes (an 800 MB download plus the import). Then:
 ```sh
 kubectl -n unifi get pod -o wide           # uos-0 Running, 1/1 Ready
 kubectl -n unifi logs uos-0 -c fetch       # "detected node architecture ...", "downloaded ... sha256=..."
-kubectl -n unifi logs uos-0 -c configure   # "seeded ..." x7, uos_uuid, system_ip
+kubectl -n unifi logs uos-0 -c configure   # "seeded ..." x7, uos_uuid, system_ip, unifi.http.port
 ```
 
-Open `https://<node-ip>:30443` (a self-signed certificate) for the setup wizard. During setup, turn off application auto-updates: an update installed inside the container is lost when the pod is recreated. Adopt devices with `set-inform http://<node-ip>:8080/inform`, or set `uos.systemIp`.
+Open `https://<node-ip>:30443` (a self-signed certificate) for the setup wizard. During setup, turn off application auto-updates: an update installed inside the container is lost when the pod is recreated. Adopt devices with `set-inform http://<node-ip>:<informPort>/inform` (8080 unless `uos.informPort` is set), or set `uos.systemIp`.
 
 Published as `oci://ghcr.io/sjultra/charts/unifi-os-server`:
 
@@ -67,6 +67,7 @@ helm install uos oci://ghcr.io/sjultra/charts/unifi-os-server --version 0.1.0 --
 | `uos.arch` | `""` | `""` detects the node's architecture at install time; `amd64` or `arm64` forces one. |
 | `uos.installers.{amd64,arm64}.{url,sha256}` | 5.1.42 | Ubiquiti's installer URL and sha256 per architecture, from `https://fw-update.ui.com/api/firmware?filter=eq~~product~~unifi-os-server`. |
 | `uos.systemIp` | `""` | The address devices inform to. Empty means the node's IP. A hostname or IPv4 address (letters, digits, dots, hyphens). |
+| `uos.informPort` | `8080` | TCP port devices inform to. Published on the node and set as UniFi's `unifi.http.port`, so adopted devices keep using it. Choose it before adopting devices: changing it later disconnects them until each is pointed at the new port (`set-inform`). |
 | `uos.allowDowngrade` | `false` | Allows starting an older version on newer data. UniFi doesn't support downgrades. |
 | `persistence.size` | `20Gi` | Size of the data PVC. |
 | `persistence.storageClass` | `""` | Storage class; empty is the cluster default. |
@@ -117,14 +118,14 @@ Factory-reset any devices you adopted if they move to another controller.
   kubectl -n unifi exec uos-0 -- journalctl -u unifi-core -u unifi --no-pager -n 200
   ```
 
-- **Devices don't adopt:** check that they can reach `http://<node-ip>:8080/inform` (it answers 400 to a plain GET) and that `system_ip` in the `configure` log is an address they can reach.
+- **Devices don't adopt:** check that they can reach `http://<node-ip>:<informPort>/inform` (it answers 400 to a plain GET), that you used that port in `set-inform`, and that `system_ip` in the `configure` log is an address they can reach.
 
 ## Known issues
 
 - Tested only against k3s 1.31 (containerd 1.7). On a node with containerd 2.x, the `ctr`/`crictl` from `tools.ctr` (k3s 1.31) are untested; set `tools.ctr` to the node's k3s version if the image steps fail.
 - Rolling back after a failed upgrade (`helm rollback`) needs `uos.allowDowngrade=true`: `configure` records the newer version on the data before the console starts, even if the upgrade then fails, and the downgrade guard refuses the older one.
 - Changing only the installer URL/sha256 for the same `uos.version` doesn't re-download: the image for that version is already on the node. Remove it on the node (`k3s crictl rmi localhost/unifi-os-server:<version>`) and restart the pod.
-- When installed from the Portal console, only the UI NodePort (30443) is checked for conflicts, not the host ports 8080/tcp, 3478/udp and 10003/udp; a clash leaves the pod Pending.
+- When installed from the Portal console, only the UI NodePort (30443) is checked for conflicts, not the host ports (inform, 3478/udp, 10003/udp, ...). A clash with another pod leaves the pod Pending; a clash with a host process isn't detected at all (see Requirements).
 
 ## Release
 

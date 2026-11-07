@@ -2,6 +2,9 @@
 {{- if and (not .Values.nodeSelector) (not .Values.affinity) }}{{ fail "nodeSelector or affinity is required: UniFi OS Server runs on one chosen node" }}{{ end }}
 {{- /* configure.sh writes it with sed: keep it to hostname/IPv4 characters */}}
 {{- if and .Values.uos.systemIp (not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$" .Values.uos.systemIp)) }}{{ fail (printf "uos.systemIp must be a hostname or IPv4 address, got %q" .Values.uos.systemIp) }}{{ end }}
+{{- $informPort := int .Values.uos.informPort }}
+{{- if or (lt $informPort 1) (gt $informPort 65535) }}{{ fail (printf "uos.informPort must be a port number (1-65535), got %v" .Values.uos.informPort) }}{{ end }}
+{{- range .Values.hostPorts.ports }}{{ if and (eq (int .port) $informPort) (eq .protocol "TCP") }}{{ fail (printf "uos.informPort %d is also in hostPorts.ports (%s)" $informPort .name) }}{{ end }}{{ end }}
 {{- /* persisted paths (Ubiquiti's mounts.json plus /data): subPath of the one PVC -> path in the image */}}
 {{- $persist := list (list "data" "/data") (list "var-lib-unifi" "/var/lib/unifi") (list "var-lib-mongodb" "/var/lib/mongodb") (list "etc-rabbitmq-ssl" "/etc/rabbitmq/ssl") (list "srv" "/srv") (list "persistent" "/persistent") (list "var-log" "/var/log") }}
 apiVersion: apps/v1
@@ -94,7 +97,7 @@ spec:
           env: *ctrEnv
           securityContext: { privileged: true }
           volumeMounts: *ctrMounts
-        # 4. write config on the data volume (seed from image, identity, downgrade guard, system_ip)
+        # 4. write config on the data volume (seed from image, identity, downgrade guard, system_ip, inform port)
         - name: configure
           image: {{ include "uos.image" . }}
           imagePullPolicy: Never
@@ -103,6 +106,7 @@ spec:
             - { name: UOS_VERSION, value: {{ .Values.uos.version | quote }} }
             - { name: ALLOW_DOWNGRADE, value: {{ .Values.uos.allowDowngrade | quote }} }
             - { name: SYSTEM_IP, value: {{ .Values.uos.systemIp | quote }} }
+            - { name: INFORM_PORT, value: {{ $informPort | quote }} }
             - name: HOST_IP
               valueFrom: { fieldRef: { fieldPath: status.hostIP } }
             - name: SEED_DIRS
@@ -139,6 +143,7 @@ spec:
             - { name: https, containerPort: 443, protocol: TCP }
             - { name: http, containerPort: 80, protocol: TCP }
             {{- if .Values.hostPorts.enabled }}
+            - { name: inform, containerPort: {{ $informPort }}, hostPort: {{ $informPort }}, protocol: TCP }
             {{- range .Values.hostPorts.ports }}
             - { name: {{ .name | trunc 15 | quote }}, containerPort: {{ .port }}, hostPort: {{ .port }}, protocol: {{ .protocol }} }
             {{- end }}
